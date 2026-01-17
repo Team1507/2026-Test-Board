@@ -26,6 +26,10 @@ public final class Constants {
    * Class is used for Constants Related to the Motor Test Subsystem
    */
   public static class MotorTest {
-    public static final int MOTOR_PORT = 0;
+    public static final int MOTOR_PORT = 5;
+  }
+
+  public static class Shooter {
+    public static final int SHOOTER_CAN_ID = 1;
   }
 }

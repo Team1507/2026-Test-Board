@@ -4,22 +4,19 @@
 
 package frc.robot.commands;
 
-// WPI Libraries
 import edu.wpi.first.wpilibj2.command.Command;
-
-// Subsystems
-import frc.robot.subsystems.MotorTest;
+import frc.robot.subsystems.ShooterSubsystem;
 
 /* You should consider using the more terse Command factories API instead https://docs.wpilib.org/en/stable/docs/software/commandbased/organizing-command-based.html#defining-commands */
-public class CmdMotorRunSubway extends Command {
-  
-  public final MotorTest motorTest;
+public class CmdRunShooter extends Command {
+  /** Creates a new CmdRunShooter. */
+  private final ShooterSubsystem shooterSubsystem;
+  private final double targetRPM;
 
-  public CmdMotorRunSubway(MotorTest motorTest) {
+  public CmdRunShooter(ShooterSubsystem shooterSubsystem, double targetRPM) {
     // Use addRequirements() here to declare subsystem dependencies.
-    this.motorTest = motorTest;
-
-    //addRequirements(motorTest);
+    this.shooterSubsystem = shooterSubsystem;
+    this.targetRPM = targetRPM;
   }
 
   // Called when the command is initially scheduled.
@@ -29,18 +26,16 @@ public class CmdMotorRunSubway extends Command {
   // Called every time the scheduler runs while the command is scheduled.
   @Override
   public void execute() {
-    motorTest.runMotor(0.2);
+    shooterSubsystem.setTargetRPM(targetRPM); // Example RPM value
   }
 
   // Called once the command ends or is interrupted.
   @Override
-  public void end(boolean interrupted) {
-    motorTest.stopMotor();
-  }
+  public void end(boolean interrupted) {}
 
   // Returns true when the command should end.
   @Override
   public boolean isFinished() {
-    return false;
+    return true;
   }
 }

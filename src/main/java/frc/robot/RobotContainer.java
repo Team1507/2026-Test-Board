@@ -4,20 +4,26 @@
 
 package frc.robot;
 
+// Constants
+import static frc.robot.Constants.OperatorConstants.DRIVE_CONTROLLER_PORT;
+
+import com.ctre.phoenix6.hardware.TalonFX;
+
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 // WPI Libraries
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import edu.wpi.first.wpilibj2.command.button.Trigger;
-
-// Subsystems
-import frc.robot.subsystems.MotorTest;
-
 // Commands
 import frc.robot.commands.CmdMotorRunSubway;
+import frc.robot.commands.CmdRunShooter;
+import frc.robot.commands.CmdShooterPIDTuner;
+// Subsystems
+import frc.robot.subsystems.MotorTest;
+import frc.robot.subsystems.ShooterSubsystem;
 
-// Constants
-import static frc.robot.Constants.OperatorConstants.*;
+import static frc.robot.Constants.Shooter.*;
 
 /**
  * This class is where the bulk of the robot should be declared. Since Command-based is a
@@ -26,7 +32,16 @@ import static frc.robot.Constants.OperatorConstants.*;
  * subsystems, commands, and trigger mappings) should be declared here.
  */
 public class RobotContainer {
-  public MotorTest m_motortest;
+  public MotorTest m_motortest = new MotorTest();
+  double shooterTargetRPM = 25;
+
+
+  public final ShooterSubsystem shooterSubsystem =
+      new ShooterSubsystem(
+          new TalonFX(SHOOTER_CAN_ID)
+      );
+
+            
 
   // The robot's subsystems and commands are defined here...
 
@@ -51,7 +66,17 @@ public class RobotContainer {
    */
   private void configureBindings() {
     // Schedule `ExampleCommand` when `exampleCondition` changes to `true`
-      m_driverController.a().onTrue(new CmdMotorRunSubway(m_motortest));
+    m_driverController.a().whileTrue(new CmdMotorRunSubway(m_motortest));
+
+    // m_driverController.a().onTrue(new CmdRunShooter(shooterSubsystem, shooterTargetRPM));
+    // m_driverController.b().onTrue(new CmdRunShooter(shooterSubsystem, 0.0));
+    //m_driverController.a().whileTrue(new CmdMotorRunSubway, 0.2);
+
+
+    SmartDashboard.putData( 
+          "Run Shooter PID Tuner",
+          new CmdShooterPIDTuner(shooterSubsystem, shooterTargetRPM) // max RPM here
+    );
   }
 
   /**
