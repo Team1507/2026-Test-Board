@@ -93,6 +93,9 @@ public class CmdShooterPIDTuner extends Command {
     private final StringBuilder fullReport = new StringBuilder();
     private final List<String> phaseSuggestions = new ArrayList<>();
     private final List<String> phaseFfSuggestions = new ArrayList<>();
+    private List<Double> phaseFfSeverities = new ArrayList<>();
+    private final List<Phase> phaseTypes = new ArrayList<>();
+
     private double testStartTime;
 
     private double maxOvershootSeen = 0;
@@ -103,6 +106,12 @@ public class CmdShooterPIDTuner extends Command {
     private double totalSettlingTime = 0;
     private int settlingTimeCount = 0;
 
+    enum FfCategory {
+        INCREASE_KV,
+        DECREASE_KV,
+        ADJUST_KA,
+        OK
+    }
 
     /** 
      * Represents a single telemetry sample collected during a phase. 
@@ -112,13 +121,11 @@ public class CmdShooterPIDTuner extends Command {
         final double t;
         final double setpoint;
         final double rpm;
-        final double voltage;
 
         Sample(double t, double setpoint, double rpm, double voltage) {
             this.t = t;
             this.setpoint = setpoint;
             this.rpm = rpm;
-            this.voltage = voltage;
         }
     }
 
@@ -150,6 +157,10 @@ public class CmdShooterPIDTuner extends Command {
     public void initialize() {
         testStartTime = Timer.getFPGATimestamp();
 
+        phaseFfSeverities.clear();
+
+        shooter.resetSimulationState();
+
         phase = Phase.SLOW_UP_STEP;
         stepIndex = 1;
         minSlowDownStepIndex = 0;
@@ -166,6 +177,8 @@ public class CmdShooterPIDTuner extends Command {
         riseTimeCount = 0;
         totalSettlingTime = 0;
         settlingTimeCount = 0;
+
+        shooter.setTargetRPM(0);
     }
 
     // -----------------------------
@@ -470,49 +483,183 @@ public class CmdShooterPIDTuner extends Command {
     private void analyzeAndReport() {
         if (samples.isEmpty()) return;
 
-        double setpoint = endSetpoint;
+        // ------------------------------------------------------------
+        // Compute setpoint bounds for this phase
+        // ------------------------------------------------------------
+        double maxSetpoint = samples.stream()
+            .mapToDouble(s -> s.setpoint)
+            .max().orElse(endSetpoint);
 
+        double minSetpoint = samples.stream()
+            .mapToDouble(s -> s.setpoint)
+            .min().orElse(endSetpoint);
+
+        // Determine if this is a slow-up or slow-down phase
+        boolean isSlowUp = endSetpoint > startSetpoint;
+
+        // ------------------------------------------------------------
+        // CATASTROPHIC FAILURE EXIT (only during SLOW_UP_STEP)
+        // ------------------------------------------------------------
+        if (phase == Phase.SLOW_UP_STEP) {
+
+            double maxRpmSeenCat = samples.stream()
+                .mapToDouble(s -> s.rpm)
+                .max().orElse(0);
+
+            double fracCat = maxRpmSeenCat / Math.max(maxSetpoint, 1);
+
+            // Read current kV from motor config
+            TalonFXConfiguration cfg = new TalonFXConfiguration();
+            shooter.getShooterMotor().getConfigurator().refresh(cfg);
+            double currentKV = cfg.Slot0.kV;
+
+            // Compute recommended kV
+            double recommendedKV = currentKV * (maxSetpoint / Math.max(maxRpmSeenCat, 1));
+
+            if (fracCat  < 0.20) {
+                appendCatastrophicFailure(
+                    String.format(
+                        "Shooter reached only %.0f%% of target. Suggested new kV = %.4f (current kV = %.4f).",
+                        fracCat * 100,
+                        recommendedKV,
+                        currentKV
+                    )
+                );
+                phase = Phase.DONE;
+                return;
+            }
+
+            if (fracCat < 0.50) {
+                appendCatastrophicFailure(
+                    String.format(
+                        "Shooter reached only %.0f%% of target. Suggested new kV = %.4f (current kV = %.4f).",
+                        fracCat * 100,
+                        recommendedKV,
+                        currentKV
+                    )
+                );
+                phase = Phase.DONE;
+                return;
+            }
+
+            if (fracCat < 0.90) {
+                appendCatastrophicFailure(
+                    String.format(
+                        "Shooter reached only %.0f%% of target. Suggested new kV = %.4f (current kV = %.4f).",
+                        fracCat * 100,
+                        recommendedKV,
+                        currentKV
+                    )
+                );
+                phase = Phase.DONE;
+                return;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // FAILURE CHECK: Did the shooter reach a meaningful fraction
+        // of the target RPM?
+        // ------------------------------------------------------------
         double maxRpmSeen = samples.stream()
             .mapToDouble(s -> s.rpm)
-            .max().orElse(setpoint);
+            .max().orElse(0);
 
-        double overshoot = Math.max(0, maxRpmSeen - setpoint);
+        double frac = maxRpmSeen / Math.max(maxSetpoint, 1);
+
+        // Hard failure: shooter cannot reach even 20% of target
+        if (frac < 0.20) {
+            appendFailureReport("Shooter reached only " + (int)(frac * 100) +
+                "% of target. kV is far too low; increase kV by 5–10×.");
+            return;
+        }
+
+        // Severe failure: shooter cannot reach 50% of target
+        if (frac < 0.50) {
+            appendFailureReport("Shooter reached only " + (int)(frac * 100) +
+                "% of target. Increase kV significantly (3–5×) and retest.");
+            return;
+        }
+
+        // Moderate failure: shooter cannot reach 90% of target
+        if (frac < 0.90) {
+            appendFailureReport("Shooter reached only " + (int)(frac * 100) +
+                "% of target. Increase kV until shooter reaches at least 95%.");
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // Compute overshoot / undershoot depending on phase direction
+        // ------------------------------------------------------------
+        double overshoot;
+
+        if (isSlowUp) {
+            overshoot = Math.max(0, maxRpmSeen - maxSetpoint);
+        } else {
+            // Slow-down: actual dips BELOW target
+            double minRpmSeen = samples.stream()
+                .mapToDouble(s -> s.rpm)
+                .min().orElse(minSetpoint);
+
+            overshoot = Math.max(0, minSetpoint - minRpmSeen);
+        }
+
+        // Track global max overshoot
         maxOvershootSeen = Math.max(maxOvershootSeen, overshoot);
 
-        // Rise time
+        // ------------------------------------------------------------
+        // Rise time (ignore first 200 ms to avoid ramp artifacts)
+        // ------------------------------------------------------------
         double riseTime = -1;
+        final double ignoreTime = 0.20; // seconds
+
         for (Sample s : samples) {
-            if (Math.abs(s.rpm - setpoint) <= rpmTolerance) {
+            if (s.t < ignoreTime) continue;
+            if (Math.abs(s.rpm - maxSetpoint) <= rpmTolerance) {
                 riseTime = s.t;
                 break;
             }
         }
 
-        // Report Rise time
         if (riseTime >= 0) {
             totalRiseTime += riseTime;
             riseTimeCount++;
         }
-        
-        // Settling time
+
+        // ------------------------------------------------------------
+        // Settling time (only after entering tolerance band)
+        // ------------------------------------------------------------
         double settlingTime = -1;
-        for (int i = samples.size() - 1; i >= 0; i--) {
+        boolean everInBand = false;
+
+        for (int i = 0; i < samples.size(); i++) {
             Sample s = samples.get(i);
-            if (Math.abs(s.rpm - setpoint) > rpmTolerance) {
-                if (i < samples.size() - 1) {
-                    settlingTime = samples.get(i + 1).t;
-                }
-                break;
+
+            if (!everInBand &&
+                Math.abs(s.rpm - maxSetpoint) <= rpmTolerance) {
+                everInBand = true;
+            }
+
+            if (everInBand &&
+                Math.abs(s.rpm - maxSetpoint) > rpmTolerance) {
+                // left the band — not settled yet
+                settlingTime = -1;
+            }
+
+            if (everInBand &&
+                Math.abs(s.rpm - maxSetpoint) <= rpmTolerance) {
+                // candidate settling time
+                settlingTime = s.t;
             }
         }
 
-        // Report Settling time
         if (settlingTime >= 0) {
             totalSettlingTime += settlingTime;
             settlingTimeCount++;
         }
 
-        // Oscillation detection
+        // ------------------------------------------------------------
+        // Oscillation detection (only after entering band)
+        // ------------------------------------------------------------
         boolean inBand = false;
         int crossings = 0;
         Double prevErr = null;
@@ -520,7 +667,7 @@ public class CmdShooterPIDTuner extends Command {
         double lastCross = 0;
 
         for (Sample s : samples) {
-            double err = setpoint - s.rpm;
+            double err = maxSetpoint - s.rpm;
 
             if (!inBand && Math.abs(err) <= rpmTolerance) {
                 inBand = true;
@@ -530,7 +677,6 @@ public class CmdShooterPIDTuner extends Command {
             if (inBand) {
                 if (prevErr != null &&
                     Math.signum(prevErr) != Math.signum(err)) {
-
                     crossings++;
                     lastCross = s.t;
                 }
@@ -538,39 +684,154 @@ public class CmdShooterPIDTuner extends Command {
             }
         }
 
-        double oscDuration = (crossings > 0) ? (lastCross - firstInBand) : 0;
+        double oscDuration = (crossings > 0)
+            ? (lastCross - firstInBand)
+            : 0;
 
-        // PID suggestion
-        String suggestion = generatePidSuggestion(
+        // ------------------------------------------------------------
+        // Initial spike metric (0–200ms, up & down)
+        // ------------------------------------------------------------
+        double maxUpSpike = 0;
+        double maxDownSpike = 0;
+
+        for (int i = 1; i < samples.size(); i++) {
+            Sample prev = samples.get(i - 1);
+            Sample curr = samples.get(i);
+
+            double dt = curr.t - prev.t;
+            if (dt <= 0) continue;
+
+            double accel = (curr.rpm - prev.rpm) / dt;  // RPM per second
+
+            // Only look at the first 200 ms of the phase
+            if (curr.t < 0.20) {
+                maxUpSpike = Math.max(maxUpSpike, accel);            
+                maxDownSpike = Math.min(maxDownSpike, accel);
+            }
+        }
+
+        double initialSpike = Math.max(maxUpSpike, Math.abs(maxDownSpike));
+
+        // ------------------------------------------------------------
+        // Correction spike metric (after entering band)
+        // ------------------------------------------------------------ 
+        double correctionSpike = computeMaxNegativeCorrectionSlope(samples, maxSetpoint);
+
+        // ------------------------------------------------------------ 
+        // PID suggestion (always) 
+        // ------------------------------------------------------------ 
+        String pidSuggestion = generatePidSuggestion(
             overshoot,
             riseTime,
             settlingTime,
             oscDuration,
-            setpoint
+            initialSpike,
+            correctionSpike,
+            maxSetpoint,
+            phase
         );
-        phaseSuggestions.add(suggestion);
 
-        // Feedforward suggestion 
-        String ffSuggestion = generateFfSuggestion( 
-            samples,
-            setpoint,
-            overshoot,
-            riseTime
-        ); 
+        phaseSuggestions.add(pidSuggestion);
+
+        // ------------------------------------------------------------ 
+        // Feedforward suggestion + severity 
+        // - Only for SLOW_UP_STEP and spike phases 
+        // - For SLOW_DOWN_STEP: text only, no severity 
+        // ------------------------------------------------------------ 
+        
+        // Steady-state fraction (last 20 samples) 
+        int n = samples.size(); 
+        int tail = Math.min(20, n); 
+        double sumTail = 0; 
+        for (int i = n - tail; i < n; i++) sumTail += samples.get(i).rpm;
+        double steadyRpm = sumTail / tail;
+        double steadyFrac = steadyRpm / Math.max(maxSetpoint, 1); 
+        
+        String ffSuggestion;
+
+        phaseTypes.add(phase);
+        
+        if (phase == Phase.SLOW_DOWN_STEP) { 
+            ffSuggestion = "Feedforward not evaluated during slow-down phases."; 
+            // No severity, but still need a severity placeholder
+            phaseFfSeverities.add(0.0);
+        } else { 
+            double ffSeverity = computeFfSeverity( 
+                overshoot, 
+                steadyFrac, 
+                riseTime, 
+                phase 
+            ); 
+            
+            if (phaseFfSeverities == null) 
+                phaseFfSeverities = new ArrayList<>(); 
+            phaseFfSeverities.add(ffSeverity); 
+            
+            ffSuggestion = generateFfSuggestion( 
+                samples, 
+                maxSetpoint, 
+                overshoot, 
+                riseTime 
+            ); 
+        } 
+        
         phaseFfSuggestions.add(ffSuggestion);
 
-        // Print report
+        // ------------------------------------------------------------
+        // 7. Append report
+        // ------------------------------------------------------------
         fullReport.append("=== Shooter PID Phase Report ===\n");
         fullReport.append("Phase: ").append(phase).append("\n");
-        fullReport.append("  Target: ").append(setpoint).append(" RPM\n");
+        fullReport.append("  Target: ").append(maxSetpoint).append(" RPM\n");
         fullReport.append("  Overshoot: ").append(overshoot).append(" RPM\n");
         fullReport.append("  Rise time: ").append(riseTime).append(" s\n");
         fullReport.append("  Settling time: ").append(settlingTime).append(" s\n");
         fullReport.append("  Oscillation duration: ").append(oscDuration)
                 .append(" s (").append(crossings).append(" crossings)\n");
-        fullReport.append(" PID Recommendation: ").append(suggestion).append("\n");
+        fullReport.append("  Initial spike: ").append(initialSpike).append(" RPM/s\n");
+        fullReport.append("  Correction spike: ").append(correctionSpike).append(" RPM/s\n");
+        fullReport.append(" PID Recommendation: ").append(pidSuggestion).append("\n");
         fullReport.append(" Feedforward Recommendation: ").append(ffSuggestion).append("\n");
         fullReport.append("--------------------------------\n\n");
+    }
+
+    /**
+     * Measures how violently the RPM changes after entering the tolerance band.
+     * This is meant to detect sharp correction spikes near the target, even when
+     * overshoot is small or zero.
+     *
+     * @param samples phase samples
+     * @param target  target RPM (maxSetpoint for this phase)
+     * @return max |dRPM/dt| after entering band, or 0 if never in band
+     */
+    private double computeMaxNegativeCorrectionSlope(List<Sample> samples, double target) {
+        if (samples.size() < 2) return 0.0;
+
+        final double band = rpmTolerance;
+        boolean inBand = false;
+        double minSlope = 0.0; // most negative
+
+        Sample prev = samples.get(0);
+
+        for (int i = 1; i < samples.size(); i++) {
+            Sample s = samples.get(i);
+
+            if (!inBand && Math.abs(s.rpm - target) <= band) {
+                inBand = true;
+            }
+
+            if (inBand) {
+                double dt = s.t - prev.t;
+                if (dt > 0) {
+                    double slope = (s.rpm - prev.rpm) / dt;
+                    minSlope = Math.min(minSlope, slope);
+                }
+            }
+
+            prev = s;
+        }
+
+        return minSlope; // negative RPM/s
     }
 
     /**
@@ -603,6 +864,11 @@ public class CmdShooterPIDTuner extends Command {
         fullReport.append("  kA: ").append(cfg.Slot0.kA).append("\n\n");
     
         fullReport.append("Overall Observations:\n");
+        double maxRpmAchieved = samples.stream()
+            .mapToDouble(s -> s.rpm)
+            .max().orElse(0);
+
+        fullReport.append("  - Max RPM achieved: ").append(maxRpmAchieved).append("\n");
         fullReport.append("  - Max overshoot observed: ").append(maxOvershootSeen).append(" RPM\n");
         fullReport.append("  - Average rise time: ")
           .append(riseTimeCount > 0 ? totalRiseTime / riseTimeCount : -1)
@@ -611,6 +877,7 @@ public class CmdShooterPIDTuner extends Command {
           .append(settlingTimeCount > 0 ? totalSettlingTime / settlingTimeCount : -1)
           .append(" s\n");
         fullReport.append("  - Oscillation detected in 0 phases\n\n");
+        
 
         fullReport.append("Overall PID Recommendation:\n");
         fullReport.append("  ").append(computeOverallPidRecommendation()).append("\n\n");
@@ -652,6 +919,7 @@ public class CmdShooterPIDTuner extends Command {
      * @param settlingTime  time to remain within tolerance band
      * @param oscDuration   duration of oscillation in seconds
      * @param setpoint      target RPM
+     * @param phase         the sequence phase
      * @return recommendation string for PID adjustment
      */
     private String generatePidSuggestion(
@@ -659,27 +927,94 @@ public class CmdShooterPIDTuner extends Command {
         double riseTime,
         double settlingTime,
         double oscDuration,
-        double setpoint
+        double initialSpike,
+        double correctionSpike,
+        double setpoint,
+        Phase phase
     ) {
-        double overshootPct = overshoot / Math.max(setpoint, 1);
+        final double initialSpikeThreshold = setpoint * 2.5;
+        final double correctionSpikeThreshold = 1500;
 
-        if (overshootPct > 0.10) { 
-            return "Reduce Kp by ~10–20% or increase Kd slightly.";
+        // ------------------------------------------------------------
+        // 1. Initial spike detection (FAST_SPIKE_MAX)
+        // ------------------------------------------------------------
+        if ((phase == Phase.FAST_SPIKE_MAX ||
+            phase == Phase.RECOVER1_SPIKE_MAX ||
+            phase == Phase.RECOVER2_SPIKE_4_5 ||
+            phase == Phase.RECOVER3_SPIKE_4_5_REPEAT)
+            && initialSpike > initialSpikeThreshold) {
+
+            return "Transient spike detected; reduce Kp slightly or add Kd to soften the initial response.";
         }
 
-        if (riseTime > 0.8) {
-            return "Increase Kp by ~10%.";
-        } 
-
-        if (oscDuration > 0.5) {
-            return "Increase Kd by ~5–15%.";
-        } 
-
-        if (settlingTime > 1.0) {
-            return "Increase Kp by ~10% or add a bit more Kd.";
+        // ------------------------------------------------------------
+        // 2. Correction spike detection
+        // ------------------------------------------------------------
+        if (correctionSpike > correctionSpikeThreshold) {
+            return "Sharp correction spike near target detected; reduce Kp slightly or add Kd.";
         }
 
+        // ------------------------------------------------------------
+        // 3. Overshoot logic
+        // ------------------------------------------------------------
+        if (overshoot > setpoint * 0.02) {
+            return "Moderate overshoot detected; reduce Kp slightly or add a touch of Kd.";
+        }
+
+        // ------------------------------------------------------------
+        // 4. Rise time logic
+        // ------------------------------------------------------------
+        if (riseTime > 0 && riseTime > 0.8) {
+            return "Rise time is slow; increase Kp by ~10%.";
+        }
+
+        // ------------------------------------------------------------
+        // 5. Settling time logic
+        // ------------------------------------------------------------
+        if (settlingTime > 3.0) {
+            return "Settling time is long; increase Kp or add a bit more Kd.";
+        }
+
+        // ------------------------------------------------------------
+        // 6. Default
+        // ------------------------------------------------------------
         return "Response looks stable. PID values appear well-tuned.";
+    }
+
+    private double computeFfSeverity(
+        double overshoot,
+        double steadyFrac,
+        double riseTime,
+        Phase phase
+    ) {
+        // Only evaluate FF on upward or spike phases
+        if (phase == Phase.SLOW_DOWN_STEP) {
+            return 0.0;
+        }
+
+        // --- kV TOO LOW: steady-state fraction < 0.95 ---
+        if (steadyFrac < 0.95) {
+            double severity = (0.95 - steadyFrac) * 10.0; // scale 0–5
+            return +severity; // positive = increase kV
+        }
+
+        // --- kV TOO HIGH: overshoot grows with setpoint ---
+        double overshootPct = overshoot / Math.max(1.0, steadyFrac * 1000.0);
+
+        // If overshoot > 3% of setpoint → classic kV too high
+        if (overshoot > 0 && overshootPct > 0.03) {
+            return -2.0; // negative = decrease kV
+        }
+
+        // --- kA too high: fast spike overshoot ---
+        if (phase == Phase.FAST_SPIKE_MAX || phase == Phase.RECOVER1_SPIKE_MAX) {
+            if (overshoot > 20) {
+                return -1.0; // reduce kA
+            }
+        }
+
+        // Otherwise FF looks fine
+        return 0.0;
     }
 
     /**
@@ -697,101 +1032,35 @@ public class CmdShooterPIDTuner extends Command {
         double overshoot,
         double riseTime
     ) {
-        if (samples.isEmpty() || setpoint <= 0) {
-            return "Insufficient data for feedforward analysis.";
+        // Compute steady-state RPM
+        int n = samples.size();
+        int tail = Math.min(20, n);
+        double sum = 0;
+        for (int i = n - tail; i < n; i++) sum += samples.get(i).rpm;
+        double steady = sum / tail;
+        double steadyFrac = steady / Math.max(setpoint, 1);
+
+        // --- kV too low ---
+        if (steadyFrac < 0.95) {
+            return String.format(
+                "kV too low: shooter only reaches %.0f%% of target RPM. Increase kV.",
+                steadyFrac * 100
+            );
         }
 
-        double maxVoltage = 0;
-        double avgVoltage = 0;
-
-        // For kS detection
-        boolean lowSpeedHesitation = false;
-
-        // For kA detection
-        double maxAccel = 0;
-        double maxAccelVoltage = 0;
-
-        // For kV detection
-        double sumVoltInBand = 0;
-        int countInBand = 0;
-
-        double prevRpm = samples.get(0).rpm;
-        double prevTime = samples.get(0).t;
-
-        for (Sample s : samples) {
-            maxVoltage = Math.max(maxVoltage, s.voltage);
-            avgVoltage += s.voltage;
-
-            // kS detection: shooter hesitates near zero RPM
-            if (s.setpoint > 200 && s.rpm < 100 && s.voltage > 2.0) {
-                lowSpeedHesitation = true;
-            }
-
-            // kV detection: steady-state voltage once in tolerance band
-            if (Math.abs(s.rpm - setpoint) <= rpmTolerance) {
-                sumVoltInBand += s.voltage;
-                countInBand++;
-            }
-
-            // kA detection: acceleration vs voltage
-            double dt = s.t - prevTime;
-            if (dt > 0) {
-                double accel = (s.rpm - prevRpm) / dt;
-                if (accel > maxAccel) {
-                    maxAccel = accel;
-                    maxAccelVoltage = s.voltage;
-                }
-            }
-
-            prevRpm = s.rpm;
-            prevTime = s.t;
-        }
-
-        avgVoltage /= samples.size();
-        double steadyVoltage = (countInBand > 0) ? (sumVoltInBand / countInBand) : avgVoltage;
+        // --- kV too high: overshoot grows with setpoint ---
         double overshootPct = overshoot / Math.max(setpoint, 1);
-
-        // -----------------------------
-        // kS Heuristics
-        // -----------------------------
-        if (lowSpeedHesitation) {
-            return "Increase kS slightly: shooter hesitates at low RPM and requires extra voltage to break static friction.";
+        if (overshootPct > 0.03) {
+            return "kV slightly too high: overshoot increases with setpoint. Reduce kV by ~3–5%.";
         }
 
-        // -----------------------------
-        // kA Heuristics
-        // -----------------------------
-        // If voltage is high but acceleration is low → kA too low
-        if (maxAccelVoltage > 10.0 && maxAccel < (setpoint * 0.5)) {
-            return "Increase kA: voltage is high during acceleration but RPM is not increasing quickly.";
-        }
-
-        // If acceleration is extremely sharp → kA too high
-        if (maxAccel > (setpoint * 1.2)) {
+        // --- kA too high ---
+        if (overshoot > 20 && riseTime < 0.4) {
             return "Reduce kA: acceleration spike is too aggressive.";
-        }
-
-        // -----------------------------
-        // kV Heuristics
-        // -----------------------------
-        // Slow rise time + low voltage → kV too low
-        if (riseTime > 0.8 && maxVoltage < 10.0) {
-            return "Increase kV: shooter is slow to reach speed and voltage is not saturated.";
-        }
-
-        // Overshoot even with moderate voltage → kV too high
-        if (overshootPct > 0.10 && steadyVoltage > 6.0) {
-            return "Reduce kV: feedforward may be pushing the shooter past the target.";
-        }
-
-        // High voltage while already near/above target
-        if (steadyVoltage > 9.0 && overshootPct > 0.05) {
-            return "Reduce kV: voltage remains high even when RPM is at or above target.";
         }
 
         return "Feedforward appears reasonable for this phase.";
     }
-
 
     /**
      * Computes an overall PID recommendation by analyzing the
@@ -801,28 +1070,29 @@ public class CmdShooterPIDTuner extends Command {
      * @return summarized PID recommendation for the entire test
      */
     private String computeOverallPidRecommendation() {
-        if (phaseSuggestions.isEmpty()) {
-            return "No PID recommendation available.";
-        }
+        int worstSeverity = -1;
+        String worstMessage = "Response looks stable. PID values appear well-tuned.";
 
-        // Count occurrences
-        java.util.Map<String, Integer> counts = new java.util.HashMap<>();
         for (String s : phaseSuggestions) {
-            counts.put(s, counts.getOrDefault(s, 0) + 1);
-        }
-
-        // Find most frequent suggestion
-        String best = null;
-        int bestCount = 0;
-
-        for (var entry : counts.entrySet()) {
-            if (entry.getValue() > bestCount) {
-                best = entry.getKey();
-                bestCount = entry.getValue();
+            int sev = pidSeverity(s);
+            if (sev > worstSeverity) {
+                worstSeverity = sev;
+                worstMessage = s;
             }
         }
 
-        return best != null ? best : "No PID recommendation available.";
+        return worstMessage;
+    }
+
+    private int pidSeverity(String s) {
+        if (s.contains("CATASTROPHIC")) return 100;
+        if (s.contains("Overshoot is high")) return 90;
+        if (s.contains("Moderate overshoot")) return 80;
+        if (s.contains("Small overshoot")) return 70;
+        if (s.contains("Rise time is slow")) return 60;
+        if (s.contains("Settling time is long")) return 50;
+        if (s.contains("Oscillation")) return 40;
+        return 0;
     }
 
     /**
@@ -833,25 +1103,72 @@ public class CmdShooterPIDTuner extends Command {
      * @return summarized FF recommendation for the entire test
      */
     private String computeOverallFfRecommendation() {
-        if (phaseFfSuggestions.isEmpty()) {
+
+        if (phaseFfSeverities == null || phaseFfSeverities.isEmpty()) {
             return "No feedforward recommendation available.";
         }
 
-        java.util.Map<String, Integer> counts = new java.util.HashMap<>();
-        for (String s : phaseFfSuggestions) {
-            counts.put(s, counts.getOrDefault(s, 0) + 1);
+        double sum = 0;
+        int count = 0;
+
+        for (int i = 0; i < phaseFfSeverities.size(); i++) {
+            Phase p = phaseTypes.get(i);
+
+            // Ignore slow-down phases entirely
+            if (p == Phase.SLOW_DOWN_STEP) continue;
+
+            sum += phaseFfSeverities.get(i);
+            count++;
         }
 
-        String best = null;
-        int bestCount = 0;
-
-        for (var entry : counts.entrySet()) {
-            if (entry.getValue() > bestCount) {
-                best = entry.getKey();
-                bestCount = entry.getValue();
-            }
+        if (count == 0) {
+            return "Feedforward not evaluated (only slow-down phases detected).";
         }
 
-        return best != null ? best : "No feedforward recommendation available.";
+        double avg = sum / count;
+
+        if (avg > 0.5) return "Increase kV: shooter is running below target RPM.";
+        if (avg < -0.5) return "Decrease kV: overshoot increases with setpoint.";
+        if (avg < -0.1) return "Slightly reduce kV (~3–5%).";
+
+        return "Feedforward appears reasonable; focus on PID tuning.";
+    }
+
+    private void appendCatastrophicFailure(String message) {
+        double maxRpmSeen = samples.stream()
+            .mapToDouble(s -> s.rpm)
+            .max().orElse(0);
+
+        phaseSuggestions.add(message);
+        phaseFfSuggestions.add("Increase kV: shooter cannot reach target RPM.");
+
+        fullReport.append("=== Shooter PID Phase Report ===\n");
+        fullReport.append("Phase: ").append(phase).append("\n");
+        fullReport.append("  Target: ").append(endSetpoint).append(" RPM\n");
+        fullReport.append("  CATASTROPHIC FAILURE: Shooter cannot reach target RPM.\n");
+        fullReport.append("  Max RPM achieved: ").append(maxRpmSeen).append(" RPM\n");
+        fullReport.append("  Recommendation: ").append(message).append("\n");
+        fullReport.append("  Feedforward Recommendation: Increase kV.\n");
+        fullReport.append("--------------------------------\n\n");
+
+        fullReport.append("=== TEST ABORTED EARLY DUE TO FAILURE ===\n");
+    }
+
+    private void appendFailureReport(String message) {
+        double maxRpmSeen = samples.stream()
+            .mapToDouble(s -> s.rpm)
+            .max().orElse(0);
+
+        phaseSuggestions.add(message);
+        phaseFfSuggestions.add("Increase kV: shooter cannot reach target RPM.");
+
+        fullReport.append("=== Shooter PID Phase Report ===\n");
+        fullReport.append("Phase: ").append(phase).append("\n");
+        fullReport.append("  Target: ").append(endSetpoint).append(" RPM\n");
+        fullReport.append("  ERROR: Shooter failed to reach target RPM.\n");
+        fullReport.append("  Max RPM achieved: ").append(maxRpmSeen).append(" RPM\n");
+        fullReport.append("  Recommendation: ").append(message).append("\n");
+        fullReport.append("  Feedforward Recommendation: Increase kV.\n");
+        fullReport.append("--------------------------------\n\n");
     }
 }

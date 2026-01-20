@@ -37,17 +37,15 @@ public class RobotContainer {
 
 
   public final ShooterSubsystem shooterSubsystem =
-      new ShooterSubsystem(
-          new TalonFX(SHOOTER_CAN_ID)
-      );
-
-            
+    new ShooterSubsystem(
+        new TalonFX(SHOOTER_CAN_ID)
+    );
 
   // The robot's subsystems and commands are defined here...
 
   // Replace with CommandPS4Controller or CommandJoystick if needed
   private final CommandXboxController m_driverController =
-      new CommandXboxController(DRIVE_CONTROLLER_PORT);
+    new CommandXboxController(DRIVE_CONTROLLER_PORT);
 
   /** The container for the robot. Contains subsystems, OI devices, and commands. */
   public RobotContainer() {
@@ -74,8 +72,8 @@ public class RobotContainer {
 
 
     SmartDashboard.putData( 
-          "Run Shooter PID Tuner",
-          new CmdShooterPIDTuner(shooterSubsystem, shooterTargetRPM) // max RPM here
+        "Run Shooter PID Tuner",
+        new CmdShooterPIDTuner(shooterSubsystem, shooterTargetRPM) // max RPM here
     );
   }
 
