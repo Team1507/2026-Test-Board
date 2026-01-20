@@ -8,7 +8,6 @@ import com.ctre.phoenix6.controls.VelocityVoltage;
 // WPI Libraries
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.wpilibj.RobotBase;
-import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 
 // Shooter Model
@@ -64,9 +63,7 @@ public class ShooterSubsystem extends SubsystemBase {
     private final ShooterModel model;
     private final PoseSupplier poseSupplier;
     private Pose2d targetPose;
-
-    /** Phoenix 6 uses motor RPS internally. */
-    private double targetMotorRPS = 0.0;
+    private double targetMotorRPM = 0.0;
 
     // ------------------------------------------------------------
     // Simulation state
@@ -164,8 +161,7 @@ public class ShooterSubsystem extends SubsystemBase {
     public double getShooterRPM() {
         if (RobotBase.isSimulation()) return simWheelRPM;
 
-        double motorRPS = shooterMotor.getVelocity().getValueAsDouble();
-        return motorRPS * 60.0;
+        return shooterMotor.getVelocity().getValueAsDouble();
     }
 
     /**
@@ -251,15 +247,14 @@ public class ShooterSubsystem extends SubsystemBase {
      * @param wheelRPM desired wheel RPM
      */
     public void setTargetRPM(double wheelRPM) {
-        double wheelRPS = wheelRPM / 60.0;
-        targetMotorRPS = wheelRPS;
+        targetMotorRPM = wheelRPM;
     }
 
     /**
      * @return current target wheel RPM
      */
     public double getTargetRPM() {
-        return targetMotorRPS * 60.0;
+        return targetMotorRPM;
     }
 
     /**
@@ -309,7 +304,7 @@ public class ShooterSubsystem extends SubsystemBase {
     public void periodic() {
 
         if (RobotBase.isReal()) {
-            shooterMotor.setControl(velocityRequest.withVelocity(targetMotorRPS));
+            shooterMotor.setControl(velocityRequest.withVelocity(targetMotorRPM));
             return;
         }
 
@@ -318,16 +313,13 @@ public class ShooterSubsystem extends SubsystemBase {
         // -----------------------------
         double dt = 0.02;
 
-        double wheelRPS = simWheelRPM / 60.0;
-        double motorRPS = wheelRPS;
-
         // 1. Sensor filtering
         double alphaSensor = dt / (Shooter.Sim.SENSOR_FILTER_TIME_CONSTANT + dt);
-        simMotorRpsMeasured += alphaSensor * (motorRPS - simMotorRpsMeasured);
+        simMotorRpsMeasured += alphaSensor * (simWheelRPM - simMotorRpsMeasured);
 
         // 2. Command filtering
         double alphaCommand = dt / (Shooter.Sim.COMMAND_FILTER_TIME_CONSTANT + dt);
-        simMotorRpsCommanded += alphaCommand * (targetMotorRPS - simMotorRpsCommanded);
+        simMotorRpsCommanded += alphaCommand * (targetMotorRPM - simMotorRpsCommanded);
 
         // 3. Phoenix-like control law
         double errorRPS = simMotorRpsCommanded - simMotorRpsMeasured;
