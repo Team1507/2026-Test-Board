@@ -27,13 +27,17 @@ public final class Constants {
    */
   public static class MotorTest {
     public static final int MOTOR_PORT = 5;
+    public static final int KRACK_PORT = 6;
+  }
+  public static class IntakeConstants {
+    public static final int INTAKE_MOTOR_PORT = 0; //originally 7
   }
 
   public static class Shooter {
     // ============================================================
     // Hardware
     // ============================================================
-    public static final int SHOOTER_CAN_ID = 1;
+    public static final int SHOOTER_CAN_ID = 0;
 
     // Maximum wheel RPM (for UI, clamping, etc.)
     public static final double MAX_RPM = 2000.0;
@@ -48,11 +52,12 @@ public final class Constants {
         public static final double KD = 0.0;
 
         // Feedforward
-        public static final double KV = 0.1353;  // volts per motor RPS  0.1353
-        public static final double KS = 0.0;
+        public static final double KV = 0.1230417880191427;  // volts per motor RPS  0.1353
+        public static final double KS = 0.06;
         public static final double KA = 0.0;
     }
 
+    
     // ============================================================
     // Flywheel Physics Constants
     // ============================================================
@@ -102,4 +107,7 @@ public final class Constants {
     }
 
   }
+  public static final class Feeder {
+      public static final int FEEDER_CAN_ID = 7;
+    }
 }

@@ -1,5 +1,7 @@
 package frc.robot.subsystems;
 
+import java.lang.reflect.GenericArrayType;
+
 // CTRE Libraries
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.hardware.TalonFX;
@@ -18,6 +20,9 @@ import frc.robot.shooter.model.ShooterModel;
 // Constants
 import frc.robot.Constants.Shooter;
 import frc.robot.Constants.Shooter.Gains;
+
+// Mechanics
+import frc.robot.mechanics.GearRatio;
 
 /**
  * ShooterSubsystem provides a unified interface for controlling a flywheel‑based shooter.
@@ -48,6 +53,9 @@ public class ShooterSubsystem extends SubsystemBase {
     /** Default target pose for model-driven shooters. */
     private static final Pose2d DEFAULT_TARGET_POSE = new Pose2d();
 
+    /** Gear ratio from motor shaft to wheel (1:1 by default). */
+    private static final GearRatio DEFAULT_GEARRATIO = new GearRatio(1.0, 2.0);
+
     // ------------------------------------------------------------
     // Hardware
     // ------------------------------------------------------------
@@ -55,6 +63,7 @@ public class ShooterSubsystem extends SubsystemBase {
     private final TalonFX shooterMotor;
     private final VelocityVoltage velocityRequest =
         new VelocityVoltage(0).withSlot(0);
+    private final GearRatio gearRatio;
 
     // ------------------------------------------------------------
     // Model-driven shooter fields
@@ -63,7 +72,7 @@ public class ShooterSubsystem extends SubsystemBase {
     private final ShooterModel model;
     private final PoseSupplier poseSupplier;
     private Pose2d targetPose;
-    private double targetMotorRPM = 0.0;
+    private double targetMotorRPS = 0.0;
 
     // ------------------------------------------------------------
     // Simulation state
@@ -89,7 +98,8 @@ public class ShooterSubsystem extends SubsystemBase {
             shooterMotor,
             DEFAULT_MODEL,
             DEFAULT_POSE_SUPPLIER,
-            DEFAULT_TARGET_POSE
+            DEFAULT_TARGET_POSE,
+            DEFAULT_GEARRATIO
         );
     }
 
@@ -109,12 +119,14 @@ public class ShooterSubsystem extends SubsystemBase {
         TalonFX shooterMotor,
         ShooterModel model,
         PoseSupplier poseSupplier,
-        Pose2d targetPose
+        Pose2d targetPose,
+        GearRatio gearRatio
     ) {
         this.shooterMotor = shooterMotor;
         this.model = model;
         this.poseSupplier = poseSupplier;
         this.targetPose = targetPose;
+        this.gearRatio = gearRatio;
     }
 
     // ------------------------------------------------------------
@@ -161,7 +173,7 @@ public class ShooterSubsystem extends SubsystemBase {
     public double getShooterRPM() {
         if (RobotBase.isSimulation()) return simWheelRPM;
 
-        return shooterMotor.getVelocity().getValueAsDouble();
+        return gearRatio.motorToOutput(shooterMotor.getVelocity().getValueAsDouble()) * 60.0;
     }
 
     /**
@@ -247,14 +259,14 @@ public class ShooterSubsystem extends SubsystemBase {
      * @param wheelRPM desired wheel RPM
      */
     public void setTargetRPM(double wheelRPM) {
-        targetMotorRPM = wheelRPM;
+        targetMotorRPS = gearRatio.outputToMotor(wheelRPM) / 60.0;
     }
 
     /**
      * @return current target wheel RPM
      */
     public double getTargetRPM() {
-        return targetMotorRPM;
+        return gearRatio.motorToOutput(targetMotorRPS) * 60.0;
     }
 
     /**
@@ -304,7 +316,7 @@ public class ShooterSubsystem extends SubsystemBase {
     public void periodic() {
 
         if (RobotBase.isReal()) {
-            shooterMotor.setControl(velocityRequest.withVelocity(targetMotorRPM));
+            shooterMotor.setControl(velocityRequest.withVelocity(targetMotorRPS));
             return;
         }
 
@@ -319,7 +331,7 @@ public class ShooterSubsystem extends SubsystemBase {
 
         // 2. Command filtering
         double alphaCommand = dt / (Shooter.Sim.COMMAND_FILTER_TIME_CONSTANT + dt);
-        simMotorRpsCommanded += alphaCommand * (targetMotorRPM - simMotorRpsCommanded);
+        simMotorRpsCommanded += alphaCommand * (targetMotorRPS - simMotorRpsCommanded);
 
         // 3. Phoenix-like control law
         double errorRPS = simMotorRpsCommanded - simMotorRpsMeasured;

@@ -4,22 +4,25 @@
 
 package frc.robot.commands;
 
-// WPI Libraries
+import edu.wpi.first.wpilibj.DutyCycle;
 import edu.wpi.first.wpilibj2.command.Command;
 
-// Subsystems
-import frc.robot.subsystems.MotorTest;
+//Import subsystems
+import frc.robot.subsystems.FeederSubsystem;
+
 
 /* You should consider using the more terse Command factories API instead https://docs.wpilib.org/en/stable/docs/software/commandbased/organizing-command-based.html#defining-commands */
-public class CmdMotorRunSubway extends Command {
+public class CmdFeederFeed extends Command {
+  /** Creates a new CmdFeederFeed. */
+
+  public final FeederSubsystem feeder;
+  public double dutyCycle;
   
-  public final MotorTest motorTest;
-
-  public CmdMotorRunSubway(MotorTest motorTest) {
+  public CmdFeederFeed(FeederSubsystem feeder) {
     // Use addRequirements() here to declare subsystem dependencies.
-    this.motorTest = motorTest;
+    this.feeder = feeder;
+  
 
-    //addRequirements(motorTest);
   }
 
   // Called when the command is initially scheduled.
@@ -29,13 +32,14 @@ public class CmdMotorRunSubway extends Command {
   // Called every time the scheduler runs while the command is scheduled.
   @Override
   public void execute() {
-    motorTest.setFXSRPM(60);
+    feeder.run(dutyCycle);
+
   }
 
   // Called once the command ends or is interrupted.
   @Override
   public void end(boolean interrupted) {
-    motorTest.stopFXSMotor();
+    feeder.stop();
   }
 
   // Returns true when the command should end.
@@ -43,4 +47,10 @@ public class CmdMotorRunSubway extends Command {
   public boolean isFinished() {
     return false;
   }
+
+  public void updateDC(double DC)
+  {
+    this.dutyCycle = DC;
+  }
+
 }

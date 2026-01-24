@@ -9,16 +9,15 @@ import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.hardware.TalonFXS;
 import com.ctre.phoenix6.signals.MotorArrangementValue;
 
-import static frc.robot.Constants.MotorTest.*;
+import static frc.robot.Constants.IntakeConstants.*;
 import frc.robot.mechanics.GearRatio;
 
-public class MotorTest extends SubsystemBase {
+public class Intake extends SubsystemBase {
 
-    private final TalonFX krackd = new TalonFX(KRACK_PORT);
-    private final TalonFXS motor = new TalonFXS(MOTOR_PORT);
+    private final TalonFXS intake = new TalonFXS(INTAKE_MOTOR_PORT);
     private final VelocityVoltage velocityRequest = new VelocityVoltage(0).withSlot(0);
 
-    public MotorTest() {
+    public Intake() {
 
         TalonFXSConfiguration config = new TalonFXSConfiguration();
 
@@ -37,37 +36,31 @@ public class MotorTest extends SubsystemBase {
                       .withPeakReverseVoltage(Volts.of(-8));
 
         // Apply configuration
-        motor.getConfigurator().apply(config);
+        intake.getConfigurator().apply(config);
     }
 
-    /** Run motor in open-loop (percent output) */
-    public void runFXSMotor(double power) {
-        motor.set(power);
-    }
-    public void runKrackMotor(double power) {
-        krackd.set(power);
+    /** Run intake in open-loop (percent output) */
+    public void runIntake(double power) {
+        intake.set(power);
     }
 
-    /** Stop motor */
-    public void stopFXSMotor() {
-        motor.set(0);
-    }
-    public void stopKrackMotor() {
-        krackd.set(0);
+    /** Stop  intake */
+    public void stopIntake() {
+        intake.set(0);
     }
 
-    /** Run motor in closed-loop velocity mode (RPM) */
+    /** Run intake in closed-loop velocity mode (RPM) */
     public void setFXSRPM(double rpm) {
         //double rps = rpm / 60.0;
         GearRatio gearRatio = new GearRatio(2, 1);
         double rps = gearRatio.outputToMotor(rpm / 60.0);
-        motor.setControl(velocityRequest.withVelocity(rps));
+        intake.setControl(velocityRequest.withVelocity(rps));
     }
 
     public double getFXSRPM() {
-        double motorRPS = motor.getVelocity().getValueAsDouble();
+        double  intakeRPS = intake.getVelocity().getValueAsDouble();
         GearRatio gearRatio = new GearRatio(2, 1);
-        double wheelRPS = gearRatio.motorToOutput(motorRPS);
+        double wheelRPS = gearRatio.motorToOutput(intakeRPS);
         return wheelRPS * 60.0;
     }
 

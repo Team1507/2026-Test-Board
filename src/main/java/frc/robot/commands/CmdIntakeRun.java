@@ -8,18 +8,17 @@ package frc.robot.commands;
 import edu.wpi.first.wpilibj2.command.Command;
 
 // Subsystems
-import frc.robot.subsystems.MotorTest;
+import frc.robot.subsystems.Intake;
 
 /* You should consider using the more terse Command factories API instead https://docs.wpilib.org/en/stable/docs/software/commandbased/organizing-command-based.html#defining-commands */
-public class CmdMotorRunSubway extends Command {
+public class CmdIntakeRun extends Command {
   
-  public final MotorTest motorTest;
+  public final Intake intake;
 
-  public CmdMotorRunSubway(MotorTest motorTest) {
+  public CmdIntakeRun(Intake intake) {
     // Use addRequirements() here to declare subsystem dependencies.
-    this.motorTest = motorTest;
-
-    //addRequirements(motorTest);
+    this.intake = intake;
+    //addRequirements(intakeTest);
   }
 
   // Called when the command is initially scheduled.
@@ -29,13 +28,14 @@ public class CmdMotorRunSubway extends Command {
   // Called every time the scheduler runs while the command is scheduled.
   @Override
   public void execute() {
-    motorTest.setFXSRPM(60);
+    System.out.println("running intake");
+    intake.setFXSRPM(60);
   }
 
   // Called once the command ends or is interrupted.
   @Override
   public void end(boolean interrupted) {
-    motorTest.stopFXSMotor();
+    intake.stopIntake();
   }
 
   // Returns true when the command should end.
